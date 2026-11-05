@@ -1110,7 +1110,7 @@ function rollEnemyCount(){const r=rnd(100);if(r<50)return 2;if(r<80)return 3;if(
 function startBattle(isBoss,isElite){const chapter=CHAPTERS[G.chapter];const progress=G.map.length>1?G.pos/(G.map.length-1):0;/* 怪物强度：基础略降，但成长曲线拉高（每层+0.85、每章×0.75）
    旧：(1.00+prog*0.55)*(1+ch*0.38) —— 每层只 +0.039，几乎不动
    新：每层 +0.85（15 层从 1.00 → 1.85），每章再 ×1.75 */
-const scale=(1.00+progress*0.85)*(1+G.chapter*0.75);const enemies=[];if(isBoss){const bossKey=pick(chapter.bosses);const e=makeEnemyFromDef(bossKey,BOSS_DEFS[bossKey],scale*1.2);e.boss=true;enemies.push(e);}else if(isElite){const n=Math.random()<0.5?1:2;for(let i=0;i<n;i++){const ek=pick(chapter.elites);const e=makeEnemyFromDef(ek,ELITE_DEFS[ek],scale);e.elite=true;enemies.push(e);}}else{const n=rollEnemyCount();const countScale=n===2?1:n===3?0.85:n===4?0.72:0.62;for(let i=0;i<n;i++){const ek=pick(chapter.enemies);const e=makeEnemyFromDef(ek,ENEMY_DEFS[ek],scale*countScale);enemies.push(e);}}G.battle={enemies,drawPile:shuffle(G.deck),discardPile:[],hand:[],energy:0,maxEnergy:G.maxEnergy,shield:0,atkBuff:G.atkBuff||0,thorns:0,rageBonus:0,doubleNext:false,countdowns:[],shieldNextTurn:0,dmgTaken:0,costReduce:0,venomCoat:0,echoEnergy:0,overloadDmg:0,playerWeakness:0,playerPoison:0,playerEntangle:0,magic:false,magicCount:{},attackPlayedThisTurn:false,cardsPlayedThisTurn:0,nextTurnBuff:0,extraEnergyNextTurn:0,regenPending:0,echoHealPerPlay:0,drawPenaltyNext:0,pendingDoom:0,rebirth:false,rebirthUsed:false,revengeCount:0,newDrawUids:[],turn:0,busy:false,over:false,isBoss,isElite,revived:new Set(),log:[]};G.screen='battle';addLog('—— 战斗开始 ——','#ffcc33');startPlayerTurn();}
+const scale=(1.00+progress*0.85)*(1+G.chapter*0.75);const enemies=[];if(isBoss){const bossKey=pick(chapter.bosses);const e=makeEnemyFromDef(bossKey,BOSS_DEFS[bossKey],scale*1.2);e.boss=true;enemies.push(e);}else if(isElite){const n=Math.random()<0.5?1:2;for(let i=0;i<n;i++){const ek=pick(chapter.elites);const e=makeEnemyFromDef(ek,ELITE_DEFS[ek],scale);e.elite=true;enemies.push(e);}}else{const n=rollEnemyCount();const countScale=n===2?1:n===3?0.85:n===4?0.72:0.62;for(let i=0;i<n;i++){const ek=pick(chapter.enemies);const e=makeEnemyFromDef(ek,ENEMY_DEFS[ek],scale*countScale);enemies.push(e);}}G.battle={enemies,drawPile:shuffle(G.deck),discardPile:[],hand:[],energy:0,maxEnergy:G.maxEnergy,shield:0,atkBuff:G.atkBuff||0,thorns:0,rageBonus:0,doubleNext:false,countdowns:[],shieldNextTurn:0,dmgTaken:0,pendingDiscard:0,pendingEntangle:0,costReduce:0,venomCoat:0,echoEnergy:0,overloadDmg:0,playerWeakness:0,playerPoison:0,playerEntangle:0,magic:false,magicCount:{},attackPlayedThisTurn:false,cardsPlayedThisTurn:0,nextTurnBuff:0,extraEnergyNextTurn:0,regenPending:0,echoHealPerPlay:0,drawPenaltyNext:0,pendingDoom:0,rebirth:false,rebirthUsed:false,revengeCount:0,newDrawUids:[],turn:0,busy:false,over:false,isBoss,isElite,revived:new Set(),log:[]};G.screen='battle';addLog('—— 战斗开始 ——','#ffcc33');startPlayerTurn();}
 function addLog(text,col){if(!G||!G.battle)return;G.battle.log.push({text,col:col||'#a0a0c0'});if(G.battle.log.length>30)G.battle.log.shift();}
 
 function takeFromDiscardByType(type){
@@ -1131,7 +1131,45 @@ function addCardToHand(id){
 function startPlayerTurn(){
   const b=G.battle;b.turn++;b.energy=b.maxEnergy;b.busy=false;b.rageBonus=0;b.doubleNext=false;b.attackPlayedThisTurn=false;b.cardsPlayedThisTurn=0;
   b.thornLocked=false;   /* 新回合：荆棘锁定解除（层数本身不补充） */
-  /* 倒计时推进 */
+  /* 解锁上回合被缠绕的牌（缠绕只持续一个回合）——必须最先做，
+     否则会把本回合刚锁上的牌又解开 */
+  b.hand.forEach(h=>h.entangled=false);
+
+  /* ===== ① 系统补牌：优先级最高，必须在任何「会抽牌的效果」之前结算 =====
+     否则倒计时/技能先抽牌，会把手牌顶到 5 张，导致这里的 needDraw 变成 0，
+     本该补的牌（含 drawBonusNext 奖励）就被吞掉了。 */
+  const targetHand=Math.max(0,5+(G.extraDraw||0)-(b.drawPenaltyNext||0)+(b.drawBonusNext||0));
+  b.drawBonusNext=0;
+  b.drawPenaltyNext=0;
+  const needDraw=Math.max(0,targetHand-b.hand.length);
+  if(needDraw>0)drawCards(needDraw);
+
+  /* ③ 结算上回合怪物留下的「弃牌」「缠绕」——必须在抽完牌之后，
+        这样打落/锁住的才是你这回合真正拿到的手牌 */
+  if(b.pendingDiscard>0){
+    let n=0;
+    for(let i=0;i<b.pendingDiscard;i++){
+      const cand=b.hand.filter(h=>!h.entangled);
+      if(!cand.length)break;
+      const h=cand[rnd(cand.length)];
+      const hi=b.hand.indexOf(h);
+      if(hi>=0){b.hand.splice(hi,1);b.discardPile.push(h.id);n++;}
+    }
+    addLog(`怪物打落了你 ${n} 张手牌`,'#c080ff');
+    if(n>0)showWarnAnim('手牌被打落！');
+    b.pendingDiscard=0;
+  }
+  if(b.pendingEntangle>0){
+    const lockCount=Math.min(b.pendingEntangle,b.hand.length);
+    if(lockCount>0){
+      const idxs=shuffle([...Array(b.hand.length).keys()]).slice(0,lockCount);
+      idxs.forEach(i=>b.hand[i].entangled=true);
+      addLog(`缠绕锁定了 ${lockCount} 张手牌（本回合）`,'#ffa0e0');
+    }
+    b.pendingEntangle=0;
+  }
+
+  /* ② 倒计时推进（可能抽牌、造成伤害，都在系统补牌之后） */
   if(b.countdowns&&b.countdowns.length){
     const due=[];
     for(const c of b.countdowns){c.left--;if(c.left<=0)due.push(c);}
@@ -1149,18 +1187,6 @@ function startPlayerTurn(){
   if(b.nextTurnBuff>0){b.rageBonus+=b.nextTurnBuff;b.nextTurnBuff=0;}
   if(b.extraEnergyNextTurn>0){b.energy+=b.extraEnergyNextTurn;b.extraEnergyNextTurn=0;}
   b.newDrawUids=[];
-  /* 解锁上回合被缠绕的牌 */
-  b.hand.forEach(h=>h.entangled=false);
-  /* 结算缠绕：按当前 playerEntangle 值锁牌，然后清零 */
-  if(b.playerEntangle>0){
-    if(b.hand.length>0){
-      const lockCount=Math.min(b.playerEntangle,b.hand.length);
-      const indices=shuffle([...Array(b.hand.length).keys()]).slice(0,lockCount);
-      indices.forEach(i=>b.hand[i].entangled=true);
-      addLog(`缠绕锁定了 ${lockCount} 张手牌（本回合）`,'#ffa0e0');
-    }
-    b.playerEntangle=0;  /* 无论手牌是否为空都清零 */
-  }
   if(CHARACTERS[G.character].skillType==='tallShield'){
     b.shield+=4;
     addLog('高人：回合开始获得 4 点护盾','#80b0ff');
@@ -1170,11 +1196,6 @@ function startPlayerTurn(){
     addLog(`再生之种：回复 ${G.hp-before} 点生命`,'#7ce87c');
     b.regenPending=0;
   }
-  const targetHand=Math.max(0,5+(G.extraDraw||0)-(b.drawPenaltyNext||0)+(b.drawBonusNext||0));
-  b.drawBonusNext=0;
-  const needDraw=Math.max(0,targetHand-b.hand.length);
-  b.drawPenaltyNext=0;
-  if(needDraw>0)drawCards(needDraw);
   if(b.pendingDoom>0){
     b.pendingDoom--;
     if(b.pendingDoom===0){
@@ -1923,7 +1944,7 @@ function endTurn(){
   const handEls=[...document.querySelectorAll('.hand .card')];
   b.hand.forEach((h,i)=>{
     const card=CARDS[h.id];
-    if(h.entangled||card.retain){toKeep.push(h);}
+    if(card.retain){toKeep.push(h);}   /* 只有「保留」词条留手，缠绕牌回合结束照常弃掉 */
     else{toDiscard.push({h,el:handEls[i]});}
   });
   toDiscard.forEach(({el},i)=>{if(el){el.style.transition='all 260ms ease-in';el.style.transform=`translate(${(i-1)*14}px,90px) rotate(${(i-1)*10}deg)`;el.style.opacity='0';}});
@@ -1931,7 +1952,7 @@ function endTurn(){
   b.playerWeakness=0;
   setTimeout(()=>{
     for(const h of cards)b.discardPile.push(h.id);
-    const keepInfo=toKeep.length>0?`，${toKeep.length} 张被保留/缠绕`:'';
+    const keepInfo=toKeep.length>0?`，${toKeep.length} 张因「保留」留在手上`:'';
     addLog(`结束回合，弃掉 ${cards.length} 张手牌${keepInfo}`,'#8a8ab0');
     render();setTimeout(enemyPhase,180);
   },280);
@@ -1991,15 +2012,10 @@ function enemyPhase(){
         if(pr0)floatText(pr0.getBoundingClientRect(),'-'+totalHit,'#ff6060');
         addLog(`${e.name} 连击 ${it.hits.length} 次，共 ${totalHit} 伤害`,'#ff6060');
       }else if(it.type==='discard'){
-        const cand=b.hand.filter(h=>!h.entangled);
-        let n=0;
-        for(let i=0;i<it.value&&cand.length;i++){
-          const k=rnd(cand.length);const h=cand.splice(k,1)[0];
-          const hi=b.hand.indexOf(h);
-          if(hi>=0){b.hand.splice(hi,1);b.discardPile.push(h.id);n++;}
-        }
-        addLog(`${e.name} 打落了你 ${n} 张手牌`,'#c080ff');
-        if(n>0)showWarnAnim('手牌被打落！');
+        /* 玩家回合结束就弃牌了，此刻手牌几乎为空：
+           延后到你下个回合（抽完牌后）再结算，才不会打在空气上 */
+        b.pendingDiscard=(b.pendingDiscard||0)+it.value;
+        addLog(`${e.name} 记下了你的手牌，下回合开始时打落 ${it.value} 张`,'#c080ff');
       }else if(it.type==='curse'){
         for(let i=0;i<it.value;i++){b.discardPile.push('attack');b.drawPile.push('attack');}
         addLog(`${e.name} 往你的牌库塞了 ${it.value} 张废牌`,'#c080ff');
@@ -2025,7 +2041,7 @@ function enemyPhase(){
         const absorbed=Math.min(b.shield,dmg);b.shield-=absorbed;dmg-=absorbed;G.hp-=dmg;b.dmgTaken=(b.dmgTaken||0)+dmg;
         if(e.weakOnHit)b.playerWeakness+=e.weakOnHit;
         if(e.poisonOnHit)b.playerPoison+=e.poisonOnHit;
-        if(e.entangleOnHit&&Math.random()<0.5)b.playerEntangle+=e.entangleOnHit;
+        if(e.entangleOnHit&&Math.random()<0.5){b.pendingEntangle=(b.pendingEntangle||0)+e.entangleOnHit;addLog(`${e.name} 的藤蔓缠住了你的手，下回合生效`,'#ffa0e0');}
         /* 荆棘：触发时按「当前层数」反伤，然后消耗 1 层；层数≥2 时触发后本回合不再触发 */
         if(b.thorns>0&&!b.thornLocked){
           const layer=b.thorns;
@@ -2045,7 +2061,7 @@ function enemyPhase(){
       }else if(it.type==='debuff'){
         if(it.effect==='weak'){b.playerWeakness+=it.value;addLog(`${e.name} 施放虚弱，你获得 ${it.value} 层虚弱`,'#c080ff');}
         else if(it.effect==='poison'){b.playerPoison+=it.value;addLog(`${e.name} 施放剧毒，你获得 ${it.value} 层中毒`,'#a0e070');}
-        else if(it.effect==='entangle'){b.playerEntangle+=it.value;addLog(`${e.name} 施放缠绕，你获得 ${it.value} 层缠绕`,'#ffa0e0');}
+        else if(it.effect==='entangle'){b.pendingEntangle=(b.pendingEntangle||0)+it.value;addLog(`${e.name} 施放缠绕，下回合开始时锁住 ${it.value} 张手牌`,'#ffa0e0');}
         const pr=document.querySelector('[data-player-drop]');if(pr)floatText(pr.getBoundingClientRect(),'状态！','#c080ff');
       }else if(it.type==='heal'){
         for(const other of b.enemies){if(other!==e&&other.hp<other.maxHp){other.hp=Math.min(other.maxHp,other.hp+it.value);addLog(`${e.name} 治疗了 ${other.name} ${it.value} 点生命`,'#7ce87c');}}
